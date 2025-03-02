@@ -1,0 +1,1 @@
+This is stock analyser Python programming that uses Langchain and OpenAI's LLM to ask for financial decisions based on several performing KPIs. In addition, it suggests a portfolio based on the Modern Portfolio Theory and the Black Litterman model based on the assets that you would like to invest in to get the best returns. 
