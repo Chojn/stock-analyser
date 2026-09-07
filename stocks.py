@@ -5,23 +5,39 @@ from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
 from IPython.display import display, Markdown
 import yfinance as yf
-from langchain_openai import ChatOpenAI
+from langchain_openrouter import ChatOpenRouter
 from scipy.optimize import minimize
 from pypfopt import risk_models, expected_returns, BlackLittermanModel, EfficientFrontier, black_litterman
 from rich import print as rprint
+import sys
+from dotenv import load_dotenv
+import os
 
-def initialise_llm(api_key):
+load_dotenv() # load env file
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+LLM_TIMEOUT_SECONDS = 30
+
+def read_file(text_file):
+    with open(text_file, 'r') as file:
+        lines = file.readlines()
+    return lines
+
+
+def initialise_llms(api_key):
     """
-    Function to initialise the OpenAI LLM model
+    Initialising GPT, Claude and Kimi K3 LLM models
 
     Args:
-        api_key (str): The api key linked to your personal/business OpenAI account
+        api_key (str): The api key linked to the OpenRouter account
     
     Returns:
         ChatOpenAI: The initialised language model
     """
-    llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=api_key)
-    return llm
+    gpt_model = ChatOpenRouter(model="openai/gpt-5.6-sol", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0, timeout=LLM_TIMEOUT_SECONDS)
+    claude_model = ChatOpenRouter(model="anthropic/claude-opus-5", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0, timeout=LLM_TIMEOUT_SECONDS)
+    kimi_model = ChatOpenRouter(model="moonshotai/kimi-k3", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0, timeout=LLM_TIMEOUT_SECONDS)
+    return gpt_model, claude_model, kimi_model
 
 def calculate_date_range(years):
     """
@@ -453,16 +469,8 @@ if __name__ == "__main__":
     years = 2
 
     #Define the list of assets to analyse 
-    assets = [
-    "Apple (AAPL)",
-    "Amazon (AMZN)",
-    "Bitcoin (BTC-USD)",
-    "Alphabet (GOOGL)",
-    "Meta (META)",
-    "Microsoft (MSFT)",
-    "Nvidia (NVDA)",
-    "S&P 500 index (SPY)",
-    "Tesla (TSLA)"]
+    assets_file = sys.argv[1]
+    assets = read_file(assets_file)
 
     #Convert asset names to their ticker symbols
     tickers = [asset.split("(")[-1].strip(")") for asset in assets]
