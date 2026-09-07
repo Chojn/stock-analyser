@@ -1,11 +1,18 @@
 import pandas as pd
 import numpy as np
+import warnings
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
-from IPython.display import display, Markdown
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.table import Table
 import yfinance as yf
 from langchain_openrouter import ChatOpenRouter
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableParallel
 from scipy.optimize import minimize
 from pypfopt import risk_models, expected_returns, BlackLittermanModel, EfficientFrontier, black_litterman
 from rich import print as rprint
@@ -13,6 +20,9 @@ import sys
 from dotenv import load_dotenv
 import os
 
+warnings.filterwarnings("ignore", category=UserWarning, module="pypfopt")
+warnings.filterwarnings("ignore", category=FutureWarning, module="pypfopt")
+console = Console()
 load_dotenv() # load env file
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -46,7 +56,7 @@ def get_tickers(text_file):
     return tickers
 
 
-def initialise_llms(api_key):
+def initialise_llms(api_key=OPENROUTER_API_KEY):
     """
     Initialising GPT, Claude and Kimi K3 LLM models
 
@@ -56,9 +66,9 @@ def initialise_llms(api_key):
     Returns:
         ChatOpenAI: The initialised language model
     """
-    gpt_model = ChatOpenRouter(model="openai/gpt-5.6-sol", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0, timeout=LLM_TIMEOUT_SECONDS)
-    claude_model = ChatOpenRouter(model="anthropic/claude-opus-5", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0, timeout=LLM_TIMEOUT_SECONDS)
-    kimi_model = ChatOpenRouter(model="moonshotai/kimi-k3", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0, timeout=LLM_TIMEOUT_SECONDS)
+    gpt_model = ChatOpenRouter(model="openai/gpt-5.6-sol", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0) #timeout=LLM_TIMEOUT_SECONDS)
+    claude_model = ChatOpenRouter(model="anthropic/claude-opus-5", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0) #timeout=LLM_TIMEOUT_SECONDS)
+    kimi_model = ChatOpenRouter(model="moonshotai/kimi-k3", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0) #timeout=LLM_TIMEOUT_SECONDS)
     return gpt_model, claude_model, kimi_model
 
 def calculate_date_range(years):
@@ -401,15 +411,178 @@ def calculate_kpis(tickers, start_date, end_date):
         }
     return kpi_data
 
-def display_stocks_report(kpi_data):
-    """
-    Displays recommendations of what stocks to hold, sell or buy based on the kpis
+def build_kpi_section_for_llm(kpi_data):
+    def trend_stats(series, decimals=2):
+        """
+        Reduce a Series to today's value plus a short trend summary:
+        recent average vs a longer baseline average, the recent range, and
+        the direction (rising/falling/flat). Returns None if there's no
+        usable data. Avoids data truncation when passed in LLM.
 
-    Args:
-        kpi_data (dict): A dictionary of all stocks and its kpis
+        Args:
+            series (pd.Series): the specific kpi data 
+
+        Return json object that describes the kpi data
+        """
+        if series is None or not isinstance(series, pd.Series):
+            return None
+        clean = series.dropna()
+        if clean.empty:
+            return None
+ 
+        today = round(clean.iloc[-1], decimals)
+        short_window = clean.tail(min(7, len(clean)))
+        long_window = clean.tail(min(30, len(clean)))
+        recent_avg = round(short_window.mean(), decimals)
+        baseline_avg = round(long_window.mean(), decimals)
+        recent_low = round(long_window.min(), decimals)
+        recent_high = round(long_window.max(), decimals)
+        trend = "rising" if recent_avg > baseline_avg else ("falling" if recent_avg < baseline_avg else "flat")
+ 
+        return {
+            "today": today,
+            "recent_avg": recent_avg,
+            "baseline_avg": baseline_avg,
+            "recent_low": recent_low,
+            "recent_high": recent_high,
+            "trend": trend,
+        }
+ 
+    def fmt(stats):
+        """
+        Format a trend_stats() result as compact text, or None if absent.
+
+        Args:
+            stats: kpi data
+        
+        Return:
+            formatted text 
+        """
+        if stats is None:
+            return "None"
+        return (f"today={stats['today']}, trend={stats['trend']} "
+                f"(recent_avg={stats['recent_avg']} vs baseline_avg={stats['baseline_avg']}), "
+                f"range=[{stats['recent_low']}, {stats['recent_high']}]")
+ 
+    rsi_lines, bollinger_lines, pe_lines, beta_lines, macd_lines = [], [], [], [], []
+ 
+    for ticker, kpis in kpi_data.items():
+        rsi_lines.append(f"{ticker}: {fmt(trend_stats(kpis.get('RSI')))}")
+ 
+        bb = kpis.get('Bollinger Bands', {})
+        bollinger_lines.append(
+            f"{ticker}: Middle {fmt(trend_stats(bb.get('Middle Band')))}; "
+            f"Upper {fmt(trend_stats(bb.get('Upper Band')))}; "
+            f"Lower {fmt(trend_stats(bb.get('Lower Band')))}"
+        )
+ 
+        pe_lines.append(f"{ticker}: {fmt(trend_stats(kpis.get('P/E Ratio')))}")
+        beta_lines.append(f"{ticker}: {kpis.get('Beta')}")  # already a scalar, no Series - no trend possible
+ 
+        macd = kpis.get('MACD', {})
+        macd_lines.append(
+            f"{ticker}: MACD {fmt(trend_stats(macd.get('MACD')))}; "
+            f"Signal {fmt(trend_stats(macd.get('Signal Line')))}"
+        )
+ 
+    return {
+        "rsi": "\n".join(rsi_lines),
+        "bollinger": "\n".join(bollinger_lines),
+        "pe": "\n".join(pe_lines),
+        "beta": "\n".join(beta_lines),
+        "macd": "\n".join(macd_lines),
+    }
+
+
+def get_combined_recommendation(kpi_data, api_key=OPENROUTER_API_KEY):
     """
-    prompt = f""" Read this data {kpi_data} and provide an executive summary with recommendations"""
-    get_llm_response(llm = llm, prompt = prompt)
+    Get an executive summary and recommendation from both GPT-5.6 Sol and Claude
+    (routed through OpenRouter), then have Kimi K3 act as an independent
+    decider that synthesises the two views into a single combined
+    recommendation.
+ 
+    Workflow:
+        1. GPT and Claude both receive the same KPI data, broken into named
+           sections (RSI, Bollinger Bands, P/E, Beta, MACD) rather than one
+           raw dict dump, in parallel, and independently produce their own
+           summary + buy/sell/hold view.
+        2. A final independent model that took no part in producing either view. 
+           It then compares the two, states where they agree or disagree, it 
+           flags the disagreement as a signal worth investigating rather than 
+           hiding it, and gives the final combined recommendation. 
+ 
+    Args:
+        kpi_data (dict): Output of calculate_kpis().
+        api_key (str): OpenRouter API key.
+ 
+    Returns:
+        dict: {
+            "gpt_view": str,
+            "claude_view": str,
+            "combined_recommendation": str
+        }
+    """
+    gpt_model, claude_model, decider_model = initialise_llms(api_key)
+    sections = build_kpi_section_for_llm(kpi_data)
+ 
+    analysis_prompt = ChatPromptTemplate.from_template(
+        "You are a financial analyst. Here is the latest KPI data across all tickers:\n\n"
+        "RSI (0-100, >70 overbought, <30 oversold):\n{rsi}\n\n"
+        "Bollinger Bands (price relative to volatility bands):\n{bollinger}\n\n"
+        "P/E Ratio (valuation):\n{pe}\n\n"
+        "Beta (volatility vs market):\n{beta}\n\n"
+        "MACD (momentum, line vs signal):\n{macd}\n\n"
+        "Provide a short executive summary and a buy/sell/hold recommendation "
+        "for each ticker, with brief reasoning."
+    )
+ 
+    gpt_chain = analysis_prompt | gpt_model | StrOutputParser()
+    claude_chain = analysis_prompt | claude_model | StrOutputParser()
+ 
+    # Run both analyst models in parallel on the same input
+    parallel = RunnableParallel(gpt_view=gpt_chain, claude_view=claude_chain)
+ 
+    try:
+        results = parallel.invoke(sections)
+    except Exception as e:
+        print(f"Warning: analyst models failed or timed out ({type(e).__name__}: {e}). Skipping LLM recommendation.")
+        return None
+ 
+    # Decider step: Kimi K3 compares the two independent views and produces the final combined answer. 
+    decider_prompt = ChatPromptTemplate.from_template(
+        "Two independent analysts reviewed the same stock KPI data and gave these views:\n\n"
+        "Analyst A (GPT-5.6 Sol):\n{gpt_view}\n\n"
+        "Analyst B (Claude Opus 5):\n{claude_view}\n\n"
+        "You are a third, independent decider with no stake in either analyst's "
+        "answer. Compare the two. Where they agree, state the consensus "
+        "recommendation clearly. Where they disagree, explain the disagreement "
+        "and flag it as worth further investigation rather than picking a side "
+        "arbitrarily. End with one combined recommendation per ticker."
+    )
+    decider_chain = decider_prompt | decider_model | StrOutputParser()
+ 
+    try:
+        combined = decider_chain.invoke(results)
+    except Exception as e:
+        print(f"Warning: Kimi K3 decider failed or timed out ({type(e).__name__}: {e}).")
+        combined = None
+ 
+    output = {
+        "gpt_view": results.get("gpt_view"),
+        "claude_view": results.get("claude_view"),
+        "combined_recommendation": combined,
+    }
+ 
+    console.print(Panel("GPT-5.6 Sol", style="bold cyan"))
+    console.print(Markdown(output["gpt_view"] or "No response."))
+ 
+    console.print(Panel("Claude Opus 5", style="bold magenta"))
+    console.print(Markdown(output["claude_view"] or "No response."))
+ 
+    console.print(Panel("Kimi K3 (decider) - combined recommendation", style="bold green"))
+    console.print(Markdown(output["combined_recommendation"] or "No response."))
+ 
+    return output
 
 
 # Modern Portfolio Theory section 
@@ -483,10 +656,114 @@ def max_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate):
                       method='SLSQP', bounds=bounds, constraints=constraints)
     return result
 
-if __name__ == "__main__":
-    api_key = "Insert your api key here"
-    llm = initialise_llms(api_key=api_key)
+def display_weights_table(title, weights_dict):
+    table = Table(title=title)
+    table.add_column("Ticker", style="cyan")
+    table.add_column("Weight", justify="right", style="green")
+    for ticker, w in weights_dict.items():
+        table.add_row(ticker, f"{float(w) * 100:.1f}%")
+    console.print(table)
 
+def run_mpt_optimisation(tickers, start_date, end_date, risk_free_rate):
+    """
+    Fetch price history and run classical Modern Portfolio Theory
+    (max-Sharpe) optimization for the given tickers.
+ 
+    Args:
+        tickers (list[str]): Ticker symbols to optimize over.
+        start_date (str): Start of the historical price window.
+        end_date (str): End of the historical price window.
+        risk_free_rate (float): Annual risk-free rate, e.g. 0.04 for 4%.
+ 
+    Returns:
+        the max-Sharpe portfolio weights
+    """
+    data = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False, progress=False)['Adj Close']
+ 
+    returns = data.pct_change(fill_method=None).dropna()
+    mean_returns = returns.mean()
+    cov_matrix = returns.cov()
+ 
+    optimal_portfolio = max_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate)
+    optimal_weights = optimal_portfolio.x
+ 
+    weights_dict = {tickers[i]: round(optimal_weights[i], 2) for i in range(len(tickers))}
+    display_weights_table("Optimal Portfolio (Max Sharpe / MPT)", weights_dict)
+    return weights_dict
+
+def run_black_litterman_optimisation(tickers, start_date, end_date, risk_free_rate,
+                                      view_long_ticker='MSFT', view_short_ticker='GOOGL',
+                                      view_pct=0.05, market_ticker='SPY',
+                                      market_cap_override=70000000000000):
+    """
+    Fetch price history and run a Black-Litterman optimisation, blending
+    market-implied equilibrium returns with one manually specified view.
+ 
+    The view defaults to "view_long_ticker will outperform view_short_ticker
+    by view_pct" (e.g. MSFT beating GOOGL by 5%) - both tickers must be
+    present in `tickers`, or this raises a clear error up front rather than
+    a raw ValueError from a failed .index() lookup deep in the function.
+ 
+    Args:
+        tickers (list[str]): Ticker symbols to optimize over.
+        start_date (str): Start of the historical price window.
+        end_date (str): End of the historical price window.
+        risk_free_rate (float): Annual risk-free rate, e.g. 0.04 for 4%.
+        view_long_ticker (str): Ticker expected to outperform. Must be in `tickers`.
+        view_short_ticker (str): Ticker expected to underperform. Must be in `tickers`.
+        view_pct (float): The expected outperformance, e.g. 0.05 for 5%.
+        market_ticker (str): Ticker used as the market proxy (for risk aversion
+            and as the source of `market_cap_override`). Must be in `tickers`.
+        market_cap_override (float): Manual market cap for `market_ticker`,
+            since index ETFs don't report one the way a company does.
+ 
+    Returns:
+        tuple(dict, EfficientFrontier): (cleaned_weights, ef) - the cleaned
+        weights dict for display, and the EfficientFrontier object itself
+        (so the caller can still call ef.portfolio_performance(verbose=True)
+        if wanted).
+    """
+    missing = [t for t in (view_long_ticker, view_short_ticker) if t not in tickers]
+    if missing:
+        raise ValueError(f"Black-Litterman view requires {missing} in the ticker list, but they're missing from {tickers}.")
+ 
+    df = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False, progress=False)['Adj Close']
+ 
+    S = risk_models.sample_cov(df) # covriance matrix showing how the stocks moves together
+
+    # market capitalisation for each stock
+    mcap = {}
+    for ticker in tickers:
+        stock = yf.Ticker(ticker)
+        try:
+            mcap[ticker] = stock.info['marketCap']
+        except KeyError:
+            mcap[ticker] = None
+
+    mcap[market_ticker] = market_cap_override
+ 
+    Q = np.array([view_pct]) # size of the belief (e.g 0.05 for outperformance)
+    P = np.zeros((1, len(tickers))) # stocks that contribute to that belief
+    P[0, tickers.index(view_long_ticker)] = 1 # find the stock that is expected to increase
+    P[0, tickers.index(view_short_ticker)] = -1 # find the stock that is expected to decrease
+ 
+    market_prices = df[market_ticker]
+    delta = black_litterman.market_implied_risk_aversion(market_prices) # estimate risk aversion of investors
+    market_prior = black_litterman.market_implied_prior_returns(mcap, delta, S, risk_free_rate)
+ 
+    bl = BlackLittermanModel(S,Q=Q,P=P,pi=market_prior,market_weights=market_prior, risk_free_rate=risk_free_rate)
+ 
+    bl_returns = bl.bl_returns()
+    bl_cov = bl.bl_cov()
+ 
+    ef = EfficientFrontier(bl_returns, bl_cov) # similar to max sharpe ratio but for black litterman
+    ef.max_sharpe(risk_free_rate=risk_free_rate)
+    cleaned_weights = ef.clean_weights()
+ 
+    display_weights_table("Optimal Portfolio (Black-Litterman)", cleaned_weights)
+    return cleaned_weights, ef
+
+if __name__ == "__main__":
     #Define the year range (change to suit your needs)
     years = 2
 
@@ -498,83 +775,14 @@ if __name__ == "__main__":
 
     # insert what you want to do from here:
     kpi_data = calculate_kpis(tickers, start_date, end_date)
-    #display_stocks_report(kpi_data)
+    combined = get_combined_recommendation(kpi_data)
 
     # change the risk free rate to get different results (must be a float) for modern portfolio theory and Black Litterman model
     risk_free_rate = 0.04
 
-    # Fetch the adjusted close prices for the tickers
-    data = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False)['Adj Close']
-
-    # Calculate daily returns
-    returns = data.pct_change(fill_method=None).dropna()
-
-    # Calculate mean returns and covariance matrix
-    mean_returns = returns.mean()
-    cov_matrix = returns.cov()
-
-    # Optimize the portfolio for maximum Sharpe ratio
-    optimal_portfolio = max_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate)
-    optimal_weights = optimal_portfolio.x
-
-    # Store the optimal weights in a dictionary and print the result
-    weights_dict = {tickers[i]: round(optimal_weights[i], 2) for i in range(len(tickers))}
-    print(weights_dict)
-
-    #Black Litterman model
-
-    # Fetch historical stock data
-    df = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False)['Adj Close']
-
-    # Calculate the sample mean returns and the covariance matrix
-    mu = expected_returns.mean_historical_return(df)
-    S = risk_models.sample_cov(df)
-
-    ## Define market capitalizations
-    mcap = {}
-    # Iterate over each ticker symbol to retrieve market capitalization
-    for ticker in tickers:
-        stock = yf.Ticker(ticker)
-        try:
-            # Attempt to get the market capitalization from stock info
-            mcap[ticker] = stock.info['marketCap']
-        except KeyError:
-            # If the market capitalization is not available, set it to None
-            mcap[ticker] = None
-
-    # Manually set the market capitalization for the S&P 500 index (SPY)
-    mcap['SPY'] = 45000000000000
-
-    # Define beliefs (Microsoft will outperform Google by 5%)
-    Q = np.array([0.05])                # Define the vector of expected returns differences (our belief)
-    P = np.zeros((1, len(tickers)))     # Initialize the matrix of constraints
-    P[0, tickers.index('MSFT')] = 1     # Set the coefficient for Microsoft to 1
-    P[0, tickers.index('GOOGL')] = -1   # Set the coefficient for Google to -1
-
-    # Calculate the market implied returns
-    market_prices = df["SPY"]
-    delta = black_litterman.market_implied_risk_aversion(market_prices)
-    market_prior = black_litterman.market_implied_prior_returns(mcap, delta, S, risk_free_rate)
-
-    # Create the Black-Litterman model
-    bl = BlackLittermanModel(S,                                   # Covariance matrix of asset returns
-                            Q  = Q,                              # Vector of expected returns differences (our beliefs)
-                            P = P,                               # Matrix representing the assets involved in the beliefs
-                            pi = market_prior,                   # Equilibrium market returns
-                            market_weights = market_prior,       # Market capitalization weights (used for the equilibrium returns)
-                            risk_free_rate = risk_free_rate)     # Risk-free rate for the model
-
-    # Get the adjusted returns and covariance matrix
-    bl_returns = bl.bl_returns()
-    bl_cov = bl.bl_cov()
-
-    # Optimize the portfolio for maximum Sharpe ratio
-    ef = EfficientFrontier(bl_returns, bl_cov)              # Create an Efficient Frontier object with the adjusted returns and covariance matrix
-    weights = ef.max_sharpe(risk_free_rate=risk_free_rate)  # Calculate the optimal portfolio weights that maximize the Sharpe ratio, considering the risk-free rate
-    cleaned_weights = ef.clean_weights()                    # Clean up the weights to remove very small values for better interpretability
-
-    # Print the optimal weights and portfolio performance
-    print(cleaned_weights)
+    mpt_weights = run_mpt_optimisation(tickers, start_date, end_date, risk_free_rate)
+ 
+    bl_weights, ef = run_black_litterman_optimisation(tickers, start_date, end_date, risk_free_rate)
     ef.portfolio_performance(verbose=True)
 
 
