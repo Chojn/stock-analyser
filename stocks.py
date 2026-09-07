@@ -21,11 +21,11 @@ LLM_TIMEOUT_SECONDS = 30
 def get_tickers(text_file):
     """
     Reads the assets text file and converts it into a list of tickers
-    
+
     Args:
         text_file (str): The text file path which stores the assets
     Returns:
-        a list of tickers or None if no successfully parsed assets
+        a list of tickers
     """
     if not os.path.isfile(text_file):
         raise FileNotFoundError(f"Asset file not found at: '{text_file}'.")
@@ -40,11 +40,10 @@ def get_tickers(text_file):
             else:
                 assets.append(line)
     if not assets:
-        return None
-    else:
-        tickers = [asset.split("(")[-1].strip(")") for asset in assets]
-        tickers.sort()
-        return tickers
+        raise ValueError(f"{text_file} exists but no usable assets")
+    tickers = [asset.split("(")[-1].strip(")") for asset in assets]
+    tickers.sort()
+    return tickers
 
 
 def initialise_llms(api_key):
