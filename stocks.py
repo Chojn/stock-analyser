@@ -66,9 +66,9 @@ def initialise_llms(api_key=OPENROUTER_API_KEY):
     Returns:
         ChatOpenAI: The initialised language model
     """
-    gpt_model = ChatOpenRouter(model="openai/gpt-5.6-sol", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0) #timeout=LLM_TIMEOUT_SECONDS)
-    claude_model = ChatOpenRouter(model="anthropic/claude-opus-5", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0) #timeout=LLM_TIMEOUT_SECONDS)
-    kimi_model = ChatOpenRouter(model="moonshotai/kimi-k3", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0) #timeout=LLM_TIMEOUT_SECONDS)
+    gpt_model = ChatOpenRouter(model="openai/gpt-5.6-sol", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0)
+    claude_model = ChatOpenRouter(model="anthropic/claude-opus-5", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0) 
+    kimi_model = ChatOpenRouter(model="moonshotai/kimi-k3", api_key=api_key, base_url=OPENROUTER_BASE_URL, temperature=0)
     return gpt_model, claude_model, kimi_model
 
 def calculate_date_range(years):
@@ -629,7 +629,7 @@ def negative_sharpe_ratio(weights, mean_returns, cov_matrix, risk_free_rate):
 
 def max_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate):
     """
-    Find the portfolio with the maximum Sharpe ratio.
+    Find the portfolio with the maximum Sharpe ratio. (Return per unit of risk)
 
     Argss:
         mean_returns (Series): Mean returns for each asset.
@@ -637,7 +637,7 @@ def max_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate):
         risk_free_rate (float): Risk-free rate.
 
     Returns:
-        OptimizeResult: The optimization result containing the portfolio weights.
+        result: The optimization result containing the portfolio weights.
     """
     # Number of assets in the portfolio
     num_assets = len(mean_returns)
