@@ -18,10 +18,33 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 LLM_TIMEOUT_SECONDS = 30
 
-def read_file(text_file):
+def get_tickers(text_file):
+    """
+    Reads the assets text file and converts it into a list of tickers
+    
+    Args:
+        text_file (str): The text file path which stores the assets
+    Returns:
+        a list of tickers or None if no successfully parsed assets
+    """
+    if not os.path.isfile(text_file):
+        raise FileNotFoundError(f"Asset file not found at: '{text_file}'.")
+    assets = []
     with open(text_file, 'r') as file:
-        lines = file.readlines()
-    return lines
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            elif '(' not in line or line[-1] != ')':
+                print(f"Warning, skipped asset {line} as didn't meet the expect format: Name (ticker)")
+            else:
+                assets.append(line)
+    if not assets:
+        return None
+    else:
+        tickers = [asset.split("(")[-1].strip(")") for asset in assets]
+        tickers.sort()
+        return tickers
 
 
 def initialise_llms(api_key):
@@ -463,18 +486,14 @@ def max_sharpe_ratio(mean_returns, cov_matrix, risk_free_rate):
 
 if __name__ == "__main__":
     api_key = "Insert your api key here"
-    llm = initialise_llm(api_key=api_key)
+    llm = initialise_llms(api_key=api_key)
 
     #Define the year range (change to suit your needs)
     years = 2
 
     #Define the list of assets to analyse 
     assets_file = sys.argv[1]
-    assets = read_file(assets_file)
-
-    #Convert asset names to their ticker symbols
-    tickers = [asset.split("(")[-1].strip(")") for asset in assets]
-    tickers.sort()
+    tickers = get_tickers(assets_file)
 
     start_date, end_date = calculate_date_range(years=years)
 
