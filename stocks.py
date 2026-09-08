@@ -15,7 +15,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableParallel
 from scipy.optimize import minimize
 from pypfopt import risk_models, expected_returns, BlackLittermanModel, EfficientFrontier, black_litterman
-from rich import print as rprint
 import sys
 from dotenv import load_dotenv
 import os
@@ -55,6 +54,18 @@ def get_tickers(text_file):
     tickers.sort()
     return tickers
 
+def download_single_ticker(ticker, start_date, end_date):
+    """
+    Download price history for one ticker, flattening yfinance's MultiIndex
+    columns (Price, Ticker) down to a flat Price-only column set. Newer
+    yfinance versions return MultiIndex columns even for a single ticker,
+    which breaks code written for the older flat-column format (e.g.
+    data['Close'] returning a DataFrame instead of a Series).
+    """
+    data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    return data
 
 def initialise_llms(api_key=OPENROUTER_API_KEY):
     """
@@ -85,16 +96,6 @@ def calculate_date_range(years):
     start_date = end_date - relativedelta(years=years)
     return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
 
-def get_llm_response(llm, prompt):
-    """
-    Get the response from the language model for a given prompt.
-
-    Args:
-        llm (ChatOpenAI): The initialized language model.
-        prompt (str): The prompt to send to the language model.
-    """
-    response = llm.invoke(prompt)
-    rprint(response.content)
 
 # KPI section
 def plot_rsi(data, ticker):
@@ -146,7 +147,7 @@ def display_rsi(tickers, start_date, end_date):
         end_date (str): The ending date
     """
     for ticker in tickers:
-        data_ticker = yf.download(ticker, start=start_date, end=end_date)
+        data_ticker = download_single_ticker(ticker, start_date=start_date, end_date=end_date)
         plot_rsi(data_ticker, ticker)
 
 def plot_bollinger_bands(data, ticker):
@@ -196,7 +197,7 @@ def display_bollinger_bands(tickers, start_date, end_date):
         end_date (str): The ending date
     """
     for ticker in tickers:
-        data_ticker = yf.download(ticker, start=start_date, end=end_date)
+        data_ticker = download_single_ticker(ticker, start_date=start_date, end_date=end_date)
         plot_bollinger_bands(data_ticker, ticker)
 
 def plot_pe_ratios(data, ticker, eps):
@@ -244,7 +245,7 @@ def display_pe_ratios(tickers, start_date, end_date):
     for ticker in tickers:
         stock = yf.Ticker(ticker)
         eps = stock.info.get('trailingEps') # Retrieve the trailing EPS value from the stock's info
-        data_ticker = yf.download(ticker, start=start_date, end=end_date)
+        data_ticker = download_single_ticker(ticker, start_date=start_date, end_date=end_date)
         plot_pe_ratios(data_ticker, ticker, eps)
 
 def plot_beta_comparison(tickers, start_date, end_date):
@@ -339,7 +340,7 @@ def display_macd(tickers, start_date, end_date):
         end_date (str): The ending date
     """
     for ticker in tickers:
-        data_ticker = yf.download(ticker, start=start_date, end=end_date)
+        data_ticker = download_single_ticker(ticker, start_date=start_date, end_date=end_date)
         plot_macd(data_ticker, ticker)
 
 
@@ -784,6 +785,3 @@ if __name__ == "__main__":
  
     bl_weights, ef = run_black_litterman_optimisation(tickers, start_date, end_date, risk_free_rate)
     ef.portfolio_performance(verbose=True)
-
-
-
